@@ -151,8 +151,19 @@ class PolicyConfig:
             "search": 60,
             "current_information": 0,
             "mutation": 0,
+            "agent_tool_call": 300,
         }
     )
+    cache_responses_with_tools: bool = False
+    """Cache LLM responses whose request carries mutation-capable tool schemas.
+
+    Agent frameworks (Hermes, LangChain, OpenAI Agents SDK, ...) send their whole
+    toolset - including ``terminal``, ``write_file``, ``delete_*`` - on every
+    call, so the default conservative rule makes their largest and most expensive
+    request permanently uncacheable.  Enabling this caches the model's *decision*
+    for an identical context; nothing is executed by a cache hit, and the
+    tool-result cache still refuses mutations unconditionally.
+    """
     semantic_categories: list[str] = field(default_factory=lambda: ["general", "static"])
     read_only_tool_prefixes: list[str] = field(
         default_factory=lambda: [
@@ -392,6 +403,8 @@ ENV_DOCS: tuple[tuple[str, str], ...] = (
     ("CACHE_ENABLED", "false disables all caching (pure passthrough proxy)"),
     ("CACHE_FAIL_OPEN", "true = on cache backend failure, still call upstream"),
     ("CACHE_STREAMING", "false disables caching of streamed responses"),
+    ("CACHE_RESPONSES_WITH_TOOLS", "true caches LLM replies for requests carrying mutating tool schemas (agent frameworks)"),
+    ("AGENT_TOOL_CALL_TTL", "TTL in seconds for the agent_tool_call category (default 300)"),
     ("SEMANTIC_CACHE", "true enables the semantic cache (default false)"),
     ("SEMANTIC_THRESHOLD", "Cosine similarity threshold, 0-1 (default 0.92)"),
     ("SEMANTIC_BACKEND", "hash | sentence_transformers | openai"),
@@ -451,6 +464,15 @@ def _apply_env(cfg: Config, env: Mapping[str, str]) -> None:
         cfg.cache.cache_streaming = _as_bool(v, cfg.cache.cache_streaming)
     if v := g("MEMORY_MAX_ENTRIES"):
         cfg.cache.memory_max_entries = _as_int(v, cfg.cache.memory_max_entries)
+
+    if (v := g("CACHE_RESPONSES_WITH_TOOLS")) is not None:
+        cfg.policy.cache_responses_with_tools = _as_bool(
+            v, cfg.policy.cache_responses_with_tools
+        )
+    if v := g("AGENT_TOOL_CALL_TTL"):
+        cfg.policy.category_ttl["agent_tool_call"] = _as_int(
+            v, cfg.policy.category_ttl.get("agent_tool_call", 300)
+        )
 
     if (v := g("SEMANTIC_CACHE")) is not None:
         cfg.semantic.enabled = _as_bool(v, cfg.semantic.enabled)

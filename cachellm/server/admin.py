@@ -188,6 +188,7 @@ _EDITABLE: dict[str, tuple[str, str, type]] = {
     "cache.cache_streaming": ("cache", "cache_streaming", bool),
     "cache.max_temperature": ("cache", "max_temperature", float),
     "cache.cache_zero_temperature_only": ("cache", "cache_zero_temperature_only", bool),
+    "policy.cache_responses_with_tools": ("policy", "cache_responses_with_tools", bool),
     "semantic.enabled": ("semantic", "enabled", bool),
     "semantic.threshold": ("semantic", "threshold", float),
     "semantic.require_single_turn": ("semantic", "require_single_turn", bool),

@@ -14,6 +14,7 @@ from cachellm.config import PolicyConfig, ToolPolicy
 from cachellm.logging_utils import mask_secret, redact_headers, redact_text, redact_value
 from cachellm.normalize import canonical_json, default_normalizer
 from cachellm.policy import (
+    CATEGORY_AGENT_TOOL_CALL,
     CATEGORY_CURRENT_INFO,
     CATEGORY_MUTATION,
     CATEGORY_READ_ONLY_TOOL,
@@ -303,6 +304,50 @@ def test_semantic_only_enabled_for_allowed_categories(engine):
     payload = {"model": "m", "messages": [{"role": "user", "content": "explain caching"}]}
     assert engine.decide_request(payload, semantic_enabled=True).semantic_allowed is True
     assert engine.decide_request(payload, semantic_enabled=False).semantic_allowed is False
+
+
+def test_agent_toolset_is_uncacheable_by_default(engine):
+    """An agent sends its whole toolset, mutating tools included."""
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "list the files then tell me about them"}],
+        "tools": [
+            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "terminal"}},
+            {"type": "function", "function": {"name": "write_file"}},
+        ],
+    }
+    decision = engine.decide_request(payload)
+    assert decision.cacheable is False
+    assert decision.category == CATEGORY_MUTATION
+
+
+def test_agent_toolset_cacheable_when_opted_in():
+    """cache_responses_with_tools caches the model's *decision*, not tool effects."""
+    policy = PolicyConfig(cache_responses_with_tools=True)
+    engine = PolicyEngine(policy, default_ttl=3600)
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "list the files then tell me about them"}],
+        "tools": [
+            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "terminal"}},
+            {"type": "function", "function": {"name": "delete_file"}},
+        ],
+    }
+    decision = engine.decide_request(payload)
+    assert decision.cacheable is True
+    assert decision.category == CATEGORY_AGENT_TOOL_CALL
+    assert decision.ttl == 300
+    assert decision.semantic_allowed is False, "tool requests must never semantic-match"
+
+
+def test_opt_in_does_not_relax_the_tool_result_cache():
+    """Caching an agent's tool-call decision must not make mutations cacheable."""
+    engine = PolicyEngine(PolicyConfig(cache_responses_with_tools=True))
+    assert engine.decide_tool("delete_repository").cacheable is False
+    assert engine.decide_tool("terminal").cacheable is False
+    assert engine.decide_tool("write_file").cacheable is False
 
 
 def test_word_boundary_matching_avoids_false_mutations(engine):

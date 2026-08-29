@@ -35,8 +35,10 @@
       "read_only_tool": 300,
       "search": 60,
       "current_information": 0,
-      "mutation": 0
+      "mutation": 0,
+      "agent_tool_call": 300
     },
+    "cache_responses_with_tools": false,
     "semantic_categories": ["general", "static"],
     "tool_policies": {
       "weather": { "cacheable": true, "ttl": 300 },

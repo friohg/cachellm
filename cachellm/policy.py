@@ -36,6 +36,15 @@ CATEGORY_READ_ONLY_TOOL = "read_only_tool"
 CATEGORY_SEARCH = "search"
 CATEGORY_CURRENT_INFO = "current_information"
 CATEGORY_MUTATION = "mutation"
+CATEGORY_AGENT_TOOL_CALL = "agent_tool_call"
+"""An LLM response for a request that carries mutation-capable tool schemas.
+
+Distinct from ``mutation`` because the cached artefact is the model's *decision*,
+not the effect of running a tool: replaying it executes nothing, the agent still
+performs the call itself.  Tool *results* are governed separately by
+:class:`ToolDecision` and mutations there are always refused.  Off by default
+(``cache_responses_with_tools``) so behaviour stays conservative unless asked.
+"""
 
 ALL_CATEGORIES = (
     CATEGORY_STATIC,
@@ -44,6 +53,7 @@ ALL_CATEGORIES = (
     CATEGORY_SEARCH,
     CATEGORY_CURRENT_INFO,
     CATEGORY_MUTATION,
+    CATEGORY_AGENT_TOOL_CALL,
 )
 
 SEARCH_TOOL_HINTS = ("search", "browse", "web", "google", "bing", "crawl", "scrape", "news")
@@ -150,12 +160,23 @@ class PolicyEngine:
             if any(
                 self.is_denied_tool(name) or self.is_mutation_tool(name) for name in tool_names
             ):
-                return CATEGORY_MUTATION
+                # An agent's toolset almost always contains mutating tools.  The
+                # response is only a *decision*, so it is cacheable when the user
+                # opts in; otherwise stay conservative.
+                return (
+                    CATEGORY_AGENT_TOOL_CALL
+                    if self.policy.cache_responses_with_tools
+                    else CATEGORY_MUTATION
+                )
             if any(hint in name.lower() for name in tool_names for hint in SEARCH_TOOL_HINTS):
                 return CATEGORY_SEARCH
             if all(self.is_read_only_tool(name) for name in tool_names):
                 return CATEGORY_READ_ONLY_TOOL
-            return CATEGORY_MUTATION
+            return (
+                CATEGORY_AGENT_TOOL_CALL
+                if self.policy.cache_responses_with_tools
+                else CATEGORY_MUTATION
+            )
 
         text = f"{extract_system_text(data)}\n{extract_query_text(data)}".lower()
         if any(marker in text for marker in self.policy.dynamic_markers):
@@ -187,7 +208,6 @@ class PolicyEngine:
 
         if category == CATEGORY_MUTATION:
             return CacheDecision(False, 0, category, reason="mutation_or_unsafe_tool")
-
         # n>1 samples multiple completions; replaying one cached set is fine, but
         # streaming logprobs/audio replay is not, so refuse those.
         if data.get("logprobs") and data.get("stream"):
@@ -258,6 +278,7 @@ class PolicyEngine:
         return {
             "default_category": self.policy.default_category,
             "category_ttl": dict(self.policy.category_ttl),
+            "cache_responses_with_tools": self.policy.cache_responses_with_tools,
             "semantic_categories": list(self.policy.semantic_categories),
             "read_only_tool_prefixes": list(self.policy.read_only_tool_prefixes),
             "mutation_tool_prefixes": list(self.policy.mutation_tool_prefixes),

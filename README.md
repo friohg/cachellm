@@ -192,6 +192,75 @@ its own key instead.
 | `POST /v1/embeddings` | Passthrough (not cached by default) |
 | `POST /v1/tools/cache/{lookup,store,policy}` | Tool-result cache API |
 
+## Using it with Hermes Agent
+
+Verified working end-to-end with Hermes Agent (`claude-opus-5-thinking` over a
+custom OpenAI-compatible provider).
+
+Point a throwaway Hermes profile at the proxy so your default profile is
+untouched:
+
+```bash
+hermes profile create cachellm-test --clone
+hermes --profile cachellm-test config set model.base_url http://127.0.0.1:4000/v1
+```
+
+Start the proxy with the same upstream your Hermes profile normally uses, and
+**turn on `CACHE_RESPONSES_WITH_TOOLS`**:
+
+```bash
+UPSTREAM_BASE_URL=https://your-provider/v1 \
+UPSTREAM_API_KEY=*** \
+CACHE_RESPONSES_WITH_TOOLS=true \
+AGENT_TOOL_CALL_TTL=1800 \
+cachellm start
+```
+
+Then use it normally: `hermes --profile cachellm-test`.
+
+### Why that flag matters for agents
+
+Hermes attaches its **entire toolset** — `terminal`, `write_file`, `delete_*` —
+to every model call. The default conservative rule sees mutating tool schemas and
+refuses to cache, so the agent's largest and most expensive request (~29k prompt
+tokens in the measured run) is never cached:
+
+```
+CACHE SKIP reason=mutation_or_unsafe_tool category=mutation
+```
+
+`CACHE_RESPONSES_WITH_TOOLS=true` reclassifies those as `agent_tool_call` and
+caches them. This is safe because **the cached artefact is the model's decision,
+not the effect of a tool**: replaying a hit executes nothing, Hermes still runs
+the tool itself. The tool-result cache is a separate subsystem and still refuses
+mutations unconditionally — `cachellm policy terminal` reports `cacheable=False`
+either way.
+
+### Measured result
+
+The same prompt run three times through Hermes:
+
+| Run | Wall time | Proxy outcome |
+|---|---|---|
+| A (cold cache) | 8.5 s | `miss` ×2 (agent_tool_call + general) |
+| B | 4.7 s | `exact_hit` ×2 |
+| C | 4.9 s | `exact_hit` ×2 |
+
+```
+requests            6
+cache hits          4  (66% hit rate)
+upstream requests   2
+tokens saved        73454
+cost without cache  0.557025 USD
+savings             0.557025 USD (100.0%)
+```
+
+A different prompt correctly produced a fresh `miss` with different keys — the
+cache did not answer a new question with an old answer.
+
+Two Hermes calls per turn is expected: one streamed tool-capable call plus one
+non-streamed follow-up. Both are cached independently.
+
 ## Verifying a CACHE HIT
 
 Three independent ways.
@@ -345,6 +414,8 @@ PORT=4000
 | `CACHE_ENABLED` | `false` = pure passthrough proxy |
 | `CACHE_FAIL_OPEN` | `true` = on cache backend failure still serve from upstream |
 | `CACHE_STREAMING` | `false` disables caching of streamed responses |
+| `CACHE_RESPONSES_WITH_TOOLS` | `true` caches LLM replies for requests carrying mutating tool schemas — needed for agent frameworks like Hermes |
+| `AGENT_TOOL_CALL_TTL` | TTL for the `agent_tool_call` category (default `300`) |
 | `SEMANTIC_CACHE` | `true` enables the semantic cache (default `false`) |
 | `SEMANTIC_THRESHOLD` | Cosine similarity threshold, 0–1 (`0.92`) |
 | `SEMANTIC_BACKEND` | `hash` \| `sentence_transformers` \| `openai` |
@@ -409,6 +480,7 @@ message order are **never** touched.
 | `search` | 60s | tool names containing search/browse/web/crawl/news |
 | `current_information` | 0 (never) | "today", "right now", "current price", "latest news", … |
 | `mutation` | 0 (never) | any create/delete/update/send/purchase/execute/deploy… tool |
+| `agent_tool_call` | 300s, **opt-in** | as `mutation`, but only when `CACHE_RESPONSES_WITH_TOOLS=true` — see the Hermes section |
 
 Hard rules that override everything: any mutation-capable or deny-listed tool
 makes the request uncacheable; unknown tool verbs are treated as unsafe; audio
@@ -631,7 +703,7 @@ No Kubernetes, no orchestration, no external services required.
 ```bash
 pip install -e ".[dev]"
 pytest -q
-# 144 passed
+# 147 passed
 ```
 
 The suite runs the real proxy against a real in-process fake upstream wired
@@ -681,7 +753,7 @@ cachellm/
   logging_utils.py   structured logging + redaction
   cli.py             cachellm command line
 examples/            python/js clients, tool-cache harness, mock upstream, e2e check
-tests/               144 tests
+tests/               147 tests
 ```
 
 Database tables: `cache_entries`, `semantic_entries`, `tool_cache_entries`,
