@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cachellm"
+version = "0.1.0"
+description = "Local-first caching proxy for OpenAI-compatible LLM APIs (exact, semantic and tool-result caching for agent workloads)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "CacheLLM" }]
+keywords = ["llm", "cache", "proxy", "openai", "agents", "semantic-cache"]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "httpx>=0.26",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
+semantic = ["numpy>=1.24", "sentence-transformers>=2.5"]
+tokens = ["tiktoken>=0.6"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "anyio>=4.0"]
+
+[project.scripts]
+cachellm = "cachellm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cachellm*"]
+
+[tool.setuptools.package-data]
+cachellm = ["server/static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CacheLLM Dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel2: #1c2230; --line: #2a323d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4f9cf9; --good: #3fb950;
+    --warn: #d29922; --bad: #f85149; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px;
+           border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
+  header .badge { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--line);
+                  padding: 2px 6px; border-radius: 4px; }
+  header .spacer { flex: 1; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+           padding: 6px 11px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  button:hover { border-color: var(--accent); }
+  button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  nav { display: flex; gap: 4px; padding: 10px 20px 0; }
+  nav button { border-radius: 6px 6px 0 0; border-bottom: none; }
+  nav button.active { background: var(--panel); border-color: var(--accent); color: var(--accent); }
+  main { padding: 16px 20px 60px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
+  .card .value { font-size: 24px; font-weight: 600; margin-top: 6px; font-family: var(--mono); }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  section { margin-top: 22px; }
+  section h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .8px;
+               color: var(--muted); margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.mono, th.mono { font-family: var(--mono); font-size: 12px; }
+  tr:hover td { background: #12171f; }
+  .pill { font: 11px var(--mono); padding: 2px 7px; border-radius: 20px; border: 1px solid var(--line); }
+  .pill.exact_hit, .pill.hit, .pill.tool_hit, .pill.coalesced { color: var(--good); border-color: #1d4429; }
+  .pill.semantic_hit { color: var(--accent); border-color: #1d3a5c; }
+  .pill.miss { color: var(--warn); border-color: #4a3a12; }
+  .pill.bypass { color: var(--muted); }
+  .pill.error { color: var(--bad); border-color: #5c1d1d; }
+  input, select { background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+                  padding: 6px 9px; border-radius: 6px; font-size: 13px; }
+  input.w { width: 320px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  pre { background: #0b0f14; border: 1px solid var(--line); border-radius: 6px; padding: 12px;
+        overflow: auto; max-height: 460px; font-family: var(--mono); font-size: 12px; }
+  .hide { display: none; }
+  .muted { color: var(--muted); }
+  .kv { display: grid; grid-template-columns: 240px 1fr; gap: 6px 12px; align-items: center; }
+  .kv label { color: var(--muted); font-size: 13px; }
+  .bar { height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; background: var(--good); }
+  .toast { position: fixed; right: 18px; bottom: 18px; background: var(--panel);
+           border: 1px solid var(--accent); padding: 10px 14px; border-radius: 8px; opacity: 0;
+           transition: opacity .2s; }
+  .toast.show { opacity: 1; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>CacheLLM</h1>
+  <span class="badge" id="version">…</span>
+  <span class="badge" id="backend">…</span>
+  <span class="badge" id="upstream">…</span>
+  <div class="spacer"></div>
+  <label class="muted" style="font-size:12px"><input type="checkbox" id="auto" checked /> auto-refresh</label>
+  <button onclick="refresh()">Refresh</button>
+</header>
+
+<nav>
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="requests">Requests</button>
+  <button data-tab="cache">Cache browser</button>
+  <button data-tab="tools">Tool cache</button>
+  <button data-tab="pricing">Pricing</button>
+  <button data-tab="config">Configuration</button>
+</nav>
+
+<main>
+  <!-- OVERVIEW -->
+  <div id="tab-overview">
+    <div class="grid" id="cards"></div>
+    <section>
+      <h2>Savings</h2>
+      <div class="card">
+        <div class="kv">
+          <label>Actual cost (upstream spend)</label><div class="mono" id="cost-actual">—</div>
+          <label>Cost without cache</label><div class="mono" id="cost-without">—</div>
+          <label>Saved</label><div class="mono" id="cost-saved">—</div>
+          <label>Percent saved</label><div class="mono" id="cost-pct">—</div>
+        </div>
+        <div class="bar"><div id="cost-bar" style="width:0%"></div></div>
+        <div class="sub muted" id="cost-note"></div>
+      </div>
+    </section>
+    <section>
+      <h2>Latency</h2>
+      <div class="grid" id="latency"></div>
+    </section>
+    <section>
+      <h2>By model</h2>
+      <table><thead><tr>
+        <th>Model</th><th>Requests</th><th>Hits</th><th>Prompt tok</th><th>Completion tok</th>
+        <th>Saved tok</th><th>Cost</th><th>Without cache</th></tr></thead>
+        <tbody id="by-model"></tbody></table>
+    </section>
+    <section>
+      <h2>Recent activity</h2>
+      <table><thead><tr>
+        <th>Time</th><th>Outcome</th><th>Model</th><th>Cat.</th><th>Latency</th>
+        <th>Tokens</th><th class="mono">Key</th><th>Prompt</th></tr></thead>
+        <tbody id="recent"></tbody></table>
+    </section>
+  </div>
+
+  <!-- REQUESTS -->
+  <div id="tab-requests" class="hide">
+    <div class="row">
+      <select id="req-outcome">
+        <option value="">all outcomes</option>
+        <option value="exact_hit">exact_hit</option>
+        <option value="semantic_hit">semantic_hit</option>
+        <option value="tool_hit">tool_hit</option>
+        <option value="coalesced">coalesced</option>
+        <option value="miss">miss</option>
+        <option value="bypass">bypass</option>
+        <option value="error">error</option>
+      </select>
+      <select id="req-limit"><option>50</option><option>100</option><option>250</option></select>
+      <button onclick="loadRequests()">Load</button>
+    </div>
+    <table><thead><tr>
+      <th>Time</th><th class="mono">Request id</th><th>Endpoint</th><th>Outcome</th><th>Model</th>
+      <th>Stream</th><th>Total ms</th><th>Cache ms</th><th>Upstream ms</th><th>Tokens</th>
+      <th>Cost</th><th>Error</th></tr></thead>
+      <tbody id="requests"></tbody></table>
+  </div>
+
+  <!-- CACHE BROWSER -->
+  <div id="tab-cache" class="hide">
+    <div class="row">
+      <input class="w" id="cache-search" placeholder="search key / prompt / response…" />
+      <input id="cache-model" placeholder="model filter" />
+      <input id="cache-ns" placeholder="namespace filter" />
+      <button onclick="loadCache()">Search</button>
+      <div class="spacer"></div>
+      <button class="danger" onclick="clearAll()">Clear all cache</button>
+    </div>
+    <div class="row">
+      <input id="inv-model" placeholder="invalidate by model" />
+      <button onclick="invalidate({model: v('inv-model')})">Invalidate model</button>
+      <input id="inv-tool" placeholder="invalidate by tool" />
+      <button onclick="invalidate({tool: v('inv-tool')})">Invalidate tool</button>
+      <input id="inv-ns" placeholder="invalidate by namespace" />
+      <button onclick="invalidate({namespace: v('inv-ns')})">Invalidate namespace</button>
+    </div>
+    <p class="muted" id="cache-total"></p>
+    <table><thead><tr>
+      <th class="mono">Key</th><th>Model</th><th>Cat.</th><th>NS</th><th>Created</th>
+      <th>TTL left</th><th>Hits</th><th>Bytes</th><th>Prompt</th><th></th></tr></thead>
+      <tbody id="cache-rows"></tbody></table>
+    <section id="entry-box" class="hide">
+      <h2>Entry detail</h2>
+      <pre id="entry-json"></pre>
+    </section>
+  </div>
+
+  <!-- TOOL CACHE -->
+  <div id="tab-tools" class="hide">
+    <div class="row">
+      <button onclick="loadTools()">Reload</button>
+      <div class="spacer"></div>
+      <input id="tool-check" placeholder="check policy for tool name" />
+      <button onclick="checkTool()">Check policy</button>
+    </div>
+    <p class="muted" id="tool-policy-result"></p>
+    <p class="muted" id="tool-total"></p>
+    <table><thead><tr>
+      <th class="mono">Key</th><th>Tool</th><th>Arguments</th><th>Created</th><th>TTL left</th>
+      <th>Hits</th><th></th></tr></thead>
+      <tbody id="tool-rows"></tbody></table>
+  </div>
+
+  <!-- PRICING -->
+  <div id="tab-pricing" class="hide">
+    <div class="row">
+      <input id="p-model" placeholder="model name" />
+      <input id="p-in" placeholder="input / 1M" style="width:120px" />
+      <input id="p-out" placeholder="output / 1M" style="width:120px" />
+      <button onclick="savePricing()">Save pricing</button>
+      <span class="muted" id="p-currency"></span>
+    </div>
+    <table><thead><tr>
+      <th>Model</th><th>Input / 1M</th><th>Output / 1M</th><th>Cached input / 1M</th><th></th>
+    </tr></thead><tbody id="pricing-rows"></tbody></table>
+    <p class="muted">Prices are yours to set — CacheLLM ships no provider prices.
+      Values are per 1,000,000 tokens in the configured currency.</p>
+  </div>
+
+  <!-- CONFIG -->
+  <div id="tab-config" class="hide">
+    <section>
+      <h2>Runtime settings</h2>
+      <div class="card"><div class="kv" id="editable"></div>
+        <div class="row" style="margin-top:12px"><button onclick="saveConfig()">Apply</button>
+        <span class="muted" id="cfg-result"></span></div>
+      </div>
+    </section>
+    <section>
+      <h2>Policy engine</h2>
+      <pre id="policy-json"></pre>
+    </section>
+    <section>
+      <h2>Effective configuration (secrets redacted)</h2>
+      <pre id="config-json"></pre>
+    </section>
+    <section>
+      <h2>Environment variables</h2>
+      <table><thead><tr><th class="mono">Name</th><th>Description</th></tr></thead>
+        <tbody id="env-rows"></tbody></table>
+    </section>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const v = id => ($(id).value || '').trim();
+const fmtNum = n => (n ?? 0).toLocaleString();
+const fmtMoney = (n, c) => `${(n ?? 0).toFixed(6)} ${c || ''}`.trim();
+const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleTimeString() : '—';
+let CURRENCY = 'USD';
+let timer = null;
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({headers: {'Content-Type': 'application/json'}}, opts || {}));
+  const text = await res.text();
+  let data; try { data = text ? JSON.parse(text) : {}; } catch (e) { data = {raw: text}; }
+  if (!res.ok) throw new Error((data.error && (data.error.message || data.error)) || res.statusText);
+  return data;
+}
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  ['overview','requests','cache','tools','pricing','config'].forEach(t =>
+    $('tab-' + t).classList.toggle('hide', t !== b.dataset.tab));
+  if (b.dataset.tab === 'cache') loadCache();
+  if (b.dataset.tab === 'tools') loadTools();
+  if (b.dataset.tab === 'pricing') loadPricing();
+  if (b.dataset.tab === 'config') loadConfig();
+  if (b.dataset.tab === 'requests') loadRequests();
+});
+
+function card(label, value, sub) {
+  return `<div class="card"><div class="label">${label}</div>
+          <div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
+
+async function refresh() {
+  try {
+    const [stats, health] = await Promise.all([api('/api/stats'), api('/health')]);
+    CURRENCY = stats.cost.currency;
+    $('version').textContent = 'v' + health.version;
+    $('backend').textContent = 'cache: ' + (health.cache.exact.backend || '?');
+    const up = health.upstream || {};
+    $('upstream').textContent = 'upstream: ' + (up.ok ? 'ok' : 'unreachable');
+    $('upstream').style.color = up.ok ? 'var(--good)' : 'var(--bad)';
+
+    const c = stats.counters;
+    $('cards').innerHTML = [
+      card('Requests', fmtNum(c.total_requests), `${fmtNum(c.upstream_requests)} upstream calls`),
+      card('Cache hit rate', stats.cache_hit_rate_pct + '%', `${fmtNum(c.cache_hits)} hits / ${fmtNum(c.cache_misses)} misses`),
+      card('Exact hits', fmtNum(c.exact_hits)),
+      card('Semantic hits', fmtNum(c.semantic_hits)),
+      card('Tool hits', fmtNum(c.tool_cache_hits)),
+      card('Coalesced', fmtNum(c.coalesced_requests), 'duplicate concurrent requests merged'),
+      card('Tokens saved', fmtNum(stats.estimated_tokens_saved),
+           `${fmtNum(c.saved_input_tokens)} in / ${fmtNum(c.saved_output_tokens)} out`),
+      card('Money saved', fmtMoney(stats.cost.savings, CURRENCY), stats.cost.savings_pct + '% of would-be spend'),
+      card('Upstream errors', fmtNum(c.upstream_errors), `${fmtNum(c.cache_errors)} cache errors`),
+    ].join('');
+
+    $('cost-actual').textContent = fmtMoney(stats.cost.actual_cost, CURRENCY);
+    $('cost-without').textContent = fmtMoney(stats.cost.cost_without_cache, CURRENCY);
+    $('cost-saved').textContent = fmtMoney(stats.cost.savings, CURRENCY);
+    $('cost-pct').textContent = stats.cost.savings_pct + '%';
+    $('cost-bar').style.width = Math.min(100, stats.cost.savings_pct) + '%';
+    $('cost-note').textContent = (stats.cost.cost_without_cache === 0)
+      ? 'No pricing configured yet — set input/output prices on the Pricing tab to see money saved.'
+      : 'Session totals. Lifetime numbers come from the SQLite usage table.';
+
+    const l = stats.latency;
+    $('latency').innerHTML = [
+      card('Avg total', l.avg_total_ms + ' ms', `${l.samples} samples`),
+      card('Avg cache lookup', l.avg_cache_lookup_ms + ' ms'),
+      card('Avg upstream', l.avg_upstream_ms + ' ms'),
+    ].join('');
+
+    $('by-model').innerHTML = (stats.by_model || []).map(m => `<tr>
+      <td class="mono">${m.model || '—'}</td><td>${fmtNum(m.requests)}</td><td>${fmtNum(m.hits)}</td>
+      <td>${fmtNum(m.prompt_tokens)}</td><td>${fmtNum(m.completion_tokens)}</td>
+      <td>${fmtNum((m.saved_prompt_tokens || 0) + (m.saved_completion_tokens || 0))}</td>
+      <td>${fmtMoney(m.cost, '')}</td><td>${fmtMoney(m.cost_without_cache, '')}</td></tr>`).join('')
+      || '<tr><td colspan="8" class="muted">no traffic yet</td></tr>';
+
+    $('recent').innerHTML = (stats.recent_requests || []).map(r => `<tr>
+      <td>${fmtTime(r.created_at)}</td>
+      <td><span class="pill ${r.outcome}">${r.outcome}</span></td>
+      <td class="mono">${r.model || '—'}</td><td class="mono">${r.category || '—'}</td>
+      <td>${r.total_latency_ms} ms</td>
+      <td>${fmtNum((r.prompt_tokens||0)+(r.completion_tokens||0))}</td>
+      <td class="mono">${r.cache_key || '—'}</td>
+      <td class="muted">${(r.prompt_excerpt || '').slice(0, 70)}</td></tr>`).join('')
+      || '<tr><td colspan="8" class="muted">no requests yet</td></tr>';
+  } catch (e) { toast('refresh failed: ' + e.message); }
+}
+
+async function loadRequests() {
+  const q = new URLSearchParams({limit: $('req-limit').value});
+  if (v('req-outcome')) q.set('outcome', v('req-outcome'));
+  const data = await api('/api/requests?' + q);
+  $('requests').innerHTML = data.requests.map(r => `<tr>
+    <td>${fmtTime(r.created_at)}</td><td class="mono">${r.request_id}</td><td>${r.endpoint}</td>
+    <td><span class="pill ${r.outcome}">${r.outcome}</span></td><td class="mono">${r.model || '—'}</td>
+    <td>${r.stream ? 'yes' : 'no'}</td><td>${(r.total_latency_ms||0).toFixed?.(1) ?? r.total_latency_ms}</td>
+    <td>${(r.cache_latency_ms||0).toFixed?.(1) ?? ''}</td><td>${(r.upstream_latency_ms||0).toFixed?.(1) ?? ''}</td>
+    <td>${fmtNum((r.prompt_tokens||0)+(r.completion_tokens||0))}</td>
+    <td>${(r.cost||0).toFixed(6)}</td><td class="muted">${r.error || ''}</td></tr>`).join('')
+    || '<tr><td colspan="12" class="muted">nothing logged</td></tr>';
+}
+
+async function loadCache() {
+  const q = new URLSearchParams({limit: 100});
+  if (v('cache-search')) q.set('search', v('cache-search'));
+  if (v('cache-model')) q.set('model', v('cache-model'));
+  if (v('cache-ns')) q.set('namespace', v('cache-ns'));
+  const data = await api('/api/cache?' + q);
+  $('cache-total').textContent = `${data.entries.length} shown of ${data.total} entries` +
+    (data.note ? ` — ${data.note}` : '');
+  $('cache-rows').innerHTML = data.entries.map(e => `<tr>
+    <td class="mono">${e.key.slice(0, 16)}</td><td class="mono">${e.model || '—'}</td>
+    <td>${e.category || '—'}</td><td>${e.namespace}</td><td>${fmtTime(e.created_at)}</td>
+    <td>${e.ttl_remaining === null ? '∞' : e.ttl_remaining + 's'}${e.expired ? ' <span class="pill error">expired</span>' : ''}</td>
+    <td>${e.hits}</td><td>${fmtNum(e.size_bytes)}</td>
+    <td class="muted">${(e.prompt_excerpt || '').slice(0, 60)}</td>
+    <td><button onclick="inspect('${e.key}')">inspect</button>
+        <button class="danger" onclick="delEntry('${e.key}')">delete</button></td></tr>`).join('')
+    || '<tr><td colspan="10" class="muted">cache is empty</td></tr>';
+}
+
+async function inspect(key) {
+  const data = await api('/api/cache/' + key);
+  $('entry-box').classList.remove('hide');
+  $('entry-json').textContent = JSON.stringify(data, null, 2);
+  $('entry-box').scrollIntoView({behavior: 'smooth'});
+}
+async function delEntry(key) {
+  await api('/api/cache/' + key, {method: 'DELETE'});
+  toast('entry deleted'); loadCache();
+}
+async function invalidate(body) {
+  const clean = Object.fromEntries(Object.entries(body).filter(([, val]) => val));
+  if (!Object.keys(clean).length) return toast('nothing to invalidate');
+  const r = await api('/api/cache/invalidate', {method: 'POST', body: JSON.stringify(clean)});
+  toast('removed ' + JSON.stringify(r.removed)); loadCache();
+}
+async function clearAll() {
+  if (!confirm('Delete every cache entry (LLM responses and tool results)?')) return;
+  const r = await api('/api/cache/invalidate', {method: 'POST', body: JSON.stringify({all: true})});
+  toast('cleared ' + JSON.stringify(r.removed)); loadCache(); refresh();
+}
+
+async function loadTools() {
+  const data = await api('/api/tools/cache?limit=100');
+  $('tool-total').textContent = `${data.entries.length} shown of ${data.total} tool entries`;
+  $('tool-rows').innerHTML = data.entries.map(e => {
+    const left = e.expires_at ? Math.max(0, Math.round(e.expires_at - Date.now() / 1000)) + 's' : '∞';
+    return `<tr><td class="mono">${e.key.slice(0, 16)}</td><td class="mono">${e.tool_name}</td>
+      <td class="mono muted">${(e.arguments || '').slice(0, 60)}</td><td>${fmtTime(e.created_at)}</td>
+      <td>${left}${e.expired ? ' <span class="pill error">expired</span>' : ''}</td><td>${e.hits}</td>
+      <td><button class="danger" onclick="delTool('${e.key}')">delete</button></td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="muted">no tool results cached</td></tr>';
+}
+async function delTool(key) {
+  await api('/api/tools/cache/' + key, {method: 'DELETE'});
+  toast('tool entry deleted'); loadTools();
+}
+async function checkTool() {
+  if (!v('tool-check')) return;
+  const r = await api('/v1/tools/cache/policy', {method: 'POST', body: JSON.stringify({tool: v('tool-check')})});
+  $('tool-policy-result').textContent =
+    `${r.tool}: cacheable=${r.cacheable} ttl=${r.ttl}s category=${r.category} (${r.reason})`;
+}
+
+async function loadPricing() {
+  const data = await api('/api/pricing');
+  $('p-currency').textContent = 'currency: ' + data.currency + ' · estimator: ' + data.token_estimator;
+  $('pricing-rows').innerHTML = data.models.map(m => `<tr>
+    <td class="mono">${m.model}</td><td>${m.input_per_1m}</td><td>${m.output_per_1m}</td>
+    <td>${m.cached_input_per_1m ?? '—'}</td>
+    <td><button class="danger" onclick="delPricing('${encodeURIComponent(m.model)}')">delete</button></td></tr>`).join('')
+    || '<tr><td colspan="5" class="muted">no per-model pricing configured</td></tr>';
+}
+async function savePricing() {
+  if (!v('p-model')) return toast('model name required');
+  await api('/api/pricing', {method: 'POST', body: JSON.stringify({
+    model: v('p-model'), input_per_1m: parseFloat(v('p-in') || '0'), output_per_1m: parseFloat(v('p-out') || '0')})});
+  toast('pricing saved'); loadPricing(); refresh();
+}
+async function delPricing(model) {
+  await api('/api/pricing/' + model, {method: 'DELETE'});
+  toast('pricing removed'); loadPricing();
+}
+
+const EDITABLE = [
+  ['cache.enabled', 'bool'], ['cache.default_ttl', 'int'], ['cache.namespace', 'str'],
+  ['cache.fail_open', 'bool'], ['cache.cache_streaming', 'bool'],
+  ['cache.max_temperature', 'float'], ['cache.cache_zero_temperature_only', 'bool'],
+  ['semantic.enabled', 'bool'], ['semantic.threshold', 'float'],
+  ['semantic.require_single_turn', 'bool'], ['semantic.allow_tools', 'bool'],
+  ['privacy.store_prompts', 'bool'], ['privacy.store_responses', 'bool'],
+  ['privacy.store_tool_arguments', 'bool'], ['privacy.store_tool_results', 'bool'],
+  ['privacy.retention_days', 'int'], ['concurrency.single_flight', 'bool'],
+  ['pricing.token_estimator', 'str'], ['pricing.chars_per_token', 'float'], ['pricing.currency', 'str'],
+];
+
+async function loadConfig() {
+  const [cfg, policy] = await Promise.all([api('/api/config'), api('/api/policy')]);
+  $('config-json').textContent = JSON.stringify(cfg.config, null, 2);
+  $('policy-json').textContent = JSON.stringify(policy, null, 2);
+  $('env-rows').innerHTML = cfg.env_docs.map(e =>
+    `<tr><td class="mono">${e.name}</td><td class="muted">${e.description}</td></tr>`).join('');
+  $('editable').innerHTML = EDITABLE.map(([path, kind]) => {
+    const [sec, key] = path.split('.');
+    const val = (cfg.config[sec] || {})[key];
+    const input = kind === 'bool'
+      ? `<input type="checkbox" data-path="${path}" data-kind="bool" ${val ? 'checked' : ''} />`
+      : `<input data-path="${path}" data-kind="${kind}" value="${val ?? ''}" style="width:200px" />`;
+    return `<label title="${path}">${path}</label><div>${input}</div>`;
+  }).join('');
+}
+async function saveConfig() {
+  const body = {};
+  document.querySelectorAll('#editable [data-path]').forEach(el => {
+    body[el.dataset.path] = el.dataset.kind === 'bool' ? el.checked : el.value;
+  });
+  const r = await api('/api/config', {method: 'POST', body: JSON.stringify(body)});
+  $('cfg-result').textContent = `applied ${Object.keys(r.applied).length} setting(s)` +
+    (Object.keys(r.rejected).length ? `, rejected: ${JSON.stringify(r.rejected)}` : '');
+  toast('configuration updated'); loadConfig();
+}
+
+$('auto').onchange = () => {
+  if ($('auto').checked) timer = setInterval(refresh, 5000);
+  else { clearInterval(timer); timer = null; }
+};
+refresh();
+timer = setInterval(refresh, 5000);
+</script>
+</body>
+</html>

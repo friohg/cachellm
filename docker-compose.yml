@@ -1,0 +1,33 @@
+services:
+  cachellm:
+    build: .
+    image: cachellm:latest
+    container_name: cachellm
+    ports:
+      - "4000:4000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4000"
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY}
+      CACHE_BACKEND: sqlite
+      SQLITE_PATH: /data/cache.db
+      DEFAULT_TTL: "3600"
+      SEMANTIC_CACHE: "false"
+      LOG_LEVEL: INFO
+    volumes:
+      - cachellm-data:/data
+    restart: unless-stopped
+
+  # Optional shared cache backend. Enable with CACHE_BACKEND=redis and
+  # REDIS_URL=redis://redis:6379/0 on the cachellm service.
+  redis:
+    image: redis:7-alpine
+    container_name: cachellm-redis
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    profiles: ["redis"]
+    ports:
+      - "6379:6379"
+
+volumes:
+  cachellm-data:

@@ -1,0 +1,73 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 4000,
+    "log_level": "INFO"
+  },
+  "upstream": {
+    "base_url": "https://api.example.com/v1",
+    "api_key": "",
+    "provider": "openai_compatible",
+    "forward_client_key": false,
+    "extra_headers": {}
+  },
+  "cache": {
+    "backend": "sqlite",
+    "sqlite_path": "./data/cache.db",
+    "default_ttl": 3600,
+    "namespace": "default",
+    "fail_open": true,
+    "cache_streaming": true,
+    "memory_max_entries": 2048
+  },
+  "semantic": {
+    "enabled": false,
+    "threshold": 0.92,
+    "backend": "hash",
+    "model": "sentence-transformers/all-MiniLM-L6-v2",
+    "require_single_turn": true,
+    "allow_tools": false
+  },
+  "policy": {
+    "category_ttl": {
+      "static": 86400,
+      "general": 3600,
+      "read_only_tool": 300,
+      "search": 60,
+      "current_information": 0,
+      "mutation": 0
+    },
+    "semantic_categories": ["general", "static"],
+    "tool_policies": {
+      "weather": { "cacheable": true, "ttl": 300 },
+      "list_repositories": { "cacheable": true, "ttl": 30 },
+      "get_file": { "cacheable": true, "ttl": 60, "include_context_keys": ["repo", "ref"] },
+      "delete_repository": { "cacheable": false, "ttl": 0 }
+    },
+    "unsafe_tool_deny_list": ["*payment*", "*transfer*", "*refund*"]
+  },
+  "pricing": {
+    "currency": "USD",
+    "token_estimator": "heuristic",
+    "chars_per_token": 4.0,
+    "models": {
+      "your-model-name": { "input_per_1m": 0.15, "output_per_1m": 0.6 }
+    },
+    "default": { "input_per_1m": 0.0, "output_per_1m": 0.0 }
+  },
+  "privacy": {
+    "store_prompts": true,
+    "store_responses": true,
+    "store_tool_arguments": true,
+    "store_tool_results": true,
+    "retention_days": 30
+  },
+  "concurrency": {
+    "single_flight": true,
+    "max_inflight": 256
+  },
+  "routing": {
+    "model_map": {},
+    "allow_unlisted_models": true
+  }
+}
