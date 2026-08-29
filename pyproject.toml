@@ -35,4 +35,7 @@ cachellm = ["server/static/*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Make `from tests.conftest import ...` work on a clean checkout (CI included),
+# not just when the repo root happens to be on sys.path.
+pythonpath = ["."]
 filterwarnings = ["ignore::DeprecationWarning"]
