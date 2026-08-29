@@ -30,7 +30,7 @@ cachellm = "cachellm.cli:main"
 include = ["cachellm*"]
 
 [tool.setuptools.package-data]
-cachellm = ["server/static/*"]
+cachellm = ["server/static/*", "server/static/*.js", "server/static/*.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

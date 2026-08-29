@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..app import AppState
 from ..config import Config
@@ -90,6 +91,9 @@ def create_app(config: Config | None = None, *, state: AppState | None = None) -
 
 def _mount_dashboard(app: FastAPI) -> None:
     index = STATIC_DIR / "index.html"
+
+    if STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard() -> HTMLResponse:

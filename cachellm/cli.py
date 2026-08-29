@@ -146,6 +146,112 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_launch(args: argparse.Namespace) -> int:
+    """Start the proxy if needed, then hand the terminal to the target app."""
+    from .launch import (
+        discover_hermes_upstream,
+        ensure_hermes_profile,
+        exec_hermes,
+        exec_with_proxy_env,
+        default_log_path,
+        proxy_is_up,
+        proxy_url,
+        start_proxy_detached,
+        wait_for_proxy,
+    )
+
+    config = load_config(args.config)
+    if args.port:
+        config.server.port = args.port
+    base = proxy_url(config)
+
+    target = (args.target or "hermes").lower()
+    passthrough = list(args.rest or [])
+    if passthrough and passthrough[0] == "--":
+        passthrough = passthrough[1:]
+
+    # Figure out the upstream. Explicit flag wins, then whatever is already in
+    # the environment/config, then whatever Hermes is configured to use.
+    hermes_info = discover_hermes_upstream(args.from_profile)
+    if args.upstream:
+        config.upstream.base_url = args.upstream.rstrip("/")
+    elif not config.upstream.base_url and hermes_info.usable:
+        config.upstream.base_url = hermes_info.base_url
+        if not config.upstream.api_key and hermes_info.api_key:
+            config.upstream.api_key = hermes_info.api_key
+        print(f"  using the upstream from your Hermes config: {hermes_info.base_url}")
+
+    if not config.upstream.base_url:
+        print(
+            "I could not work out which provider to forward to.\n"
+            "Pass one with --upstream https://your-provider/v1, or set "
+            "UPSTREAM_BASE_URL.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Agent frameworks send their whole toolset on every call, so without this
+    # their biggest request is classified as a mutation and never cached.
+    extra_env: dict[str, str] = {}
+    if not args.strict_tools:
+        extra_env["CACHE_RESPONSES_WITH_TOOLS"] = "true"
+        if args.tool_ttl:
+            extra_env["AGENT_TOOL_CALL_TTL"] = str(args.tool_ttl)
+    if args.semantic:
+        extra_env["SEMANTIC_CACHE"] = "true"
+    if args.ttl is not None:
+        extra_env["DEFAULT_TTL"] = str(args.ttl)
+
+    already_running = proxy_is_up(base)
+    if already_running:
+        print(f"  cache already running at {base}")
+    else:
+        log_path = default_log_path()
+        print(f"  starting the cache at {base}  (log: {log_path})")
+        start_proxy_detached(
+            config,
+            upstream=(
+                None
+                if args.upstream or os.environ.get("UPSTREAM_BASE_URL")
+                else hermes_info
+            ),
+            extra_env={
+                "UPSTREAM_BASE_URL": config.upstream.base_url,
+                **({"UPSTREAM_API_KEY": config.upstream.api_key} if config.upstream.api_key else {}),
+                **extra_env,
+            },
+            log_path=log_path,
+        )
+        if not wait_for_proxy(base):
+            print(
+                f"the cache did not come up within 25s. Check {log_path} for why.",
+                file=sys.stderr,
+            )
+            return 1
+        print("  cache is up")
+
+    if target == "hermes":
+        profile = args.profile_name or DEFAULT_LAUNCH_PROFILE
+        ok, detail = ensure_hermes_profile(
+            profile, base, source_profile=args.from_profile, verbose=args.verbose
+        )
+        if not ok:
+            print(detail, file=sys.stderr)
+            return 1
+        print(f"  Hermes profile '{profile}' ({detail}) points at the cache")
+        print(f"  dashboard: {base}/dashboard\n")
+        return exec_hermes(profile, passthrough)
+
+    if target in {"cmd", "command", "exec", "--"}:
+        return exec_with_proxy_env(passthrough, base)
+
+    # `cachellm launch aider --model x` - treat the target as the program.
+    return exec_with_proxy_env([target, *passthrough], base)
+
+
+DEFAULT_LAUNCH_PROFILE = "cachellm"
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     ok, data = _try_http("GET", f"{_base_url(config, args.url)}/api/stats")
@@ -494,6 +600,51 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--log-level")
     start.add_argument("--access-log", action="store_true", help="enable uvicorn access logs")
     start.set_defaults(func=cmd_start)
+
+    launch = sub.add_parser(
+        "launch",
+        help="start the cache and launch an app through it (default: hermes)",
+        description=(
+            "Bring the cache up if it isn't already, point the app at it, and hand "
+            "over the terminal. With no target this launches Hermes Agent using a "
+            "dedicated profile, so your normal profile is left alone."
+        ),
+    )
+    launch.add_argument(
+        "target",
+        nargs="?",
+        default="hermes",
+        help="hermes (default), or any program that reads OPENAI_BASE_URL",
+    )
+    launch.add_argument(
+        "rest",
+        nargs=argparse.REMAINDER,
+        help="arguments passed straight through to the target",
+    )
+    launch.add_argument("--port", type=int, help="proxy port (default 4000)")
+    launch.add_argument("--upstream", help="provider base URL to forward to")
+    launch.add_argument(
+        "--profile-name",
+        help=f"Hermes profile to use/create (default {DEFAULT_LAUNCH_PROFILE})",
+    )
+    launch.add_argument(
+        "--from-profile",
+        help="Hermes profile to read the upstream from and clone (default: default)",
+    )
+    launch.add_argument("--ttl", type=int, help="default cache TTL in seconds")
+    launch.add_argument(
+        "--tool-ttl", type=int, default=1800,
+        help="TTL for agent tool-call responses (default 1800)",
+    )
+    launch.add_argument("--semantic", action="store_true", help="enable the semantic cache")
+    launch.add_argument(
+        "--strict-tools",
+        action="store_true",
+        help="do NOT cache responses for requests carrying mutating tool schemas "
+             "(more conservative; caches much less for agents)",
+    )
+    launch.add_argument("--verbose", action="store_true", help="show the hermes setup output")
+    launch.set_defaults(func=cmd_launch)
 
     stats = sub.add_parser("stats", help="show statistics and savings")
     stats.add_argument("--json", action="store_true")

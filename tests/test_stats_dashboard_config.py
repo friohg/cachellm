@@ -176,7 +176,8 @@ async def test_dashboard_html_served(client):
     response = await client.get("/dashboard")
     assert response.status_code == 200
     assert "CacheLLM" in response.text
-    assert "api/stats" in response.text
+    # Behaviour lives in a separate script now, so the page links to it.
+    assert "/static/dashboard.js" in response.text
 
 
 async def test_root_redirects_to_dashboard(client):
