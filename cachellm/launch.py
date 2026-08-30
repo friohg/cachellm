@@ -321,8 +321,11 @@ def ensure_hermes_profile(
     return True, ("created" if created else "reused")
 
 
-def exec_hermes(profile: str, passthrough: list[str]) -> int:
-    """Hand the terminal over to Hermes. Interactive, inherits stdin/stdout."""
+def exec_hermes(profile: str | None, passthrough: list[str]) -> int:
+    """Hand the terminal over to Hermes. Interactive, inherits stdin/stdout.
+
+    ``profile=None`` means the default profile, so no --profile flag at all.
+    """
     executable = hermes_executable()
     if executable is None:
         print(
@@ -331,7 +334,10 @@ def exec_hermes(profile: str, passthrough: list[str]) -> int:
             file=sys.stderr,
         )
         return 127
-    command = [executable, "--profile", profile, *passthrough]
+    command = [executable]
+    if profile and profile != "default":
+        command += ["--profile", profile]
+    command += passthrough
     try:
         return subprocess.call(command)
     except KeyboardInterrupt:
