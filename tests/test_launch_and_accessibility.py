@@ -138,15 +138,33 @@ def test_launch_defaults_to_hermes():
 
 
 def test_launch_passes_extra_args_through():
-    args = build_parser().parse_args(["launch", "hermes", "--", "-q", "hello"])
+    """`--` separation is handled in main(), not the parser, so test it there."""
+    from cachellm.cli import build_parser as bp
+
+    raw = ["launch", "hermes", "--", "-q", "hello"]
+    index = raw.index("--")
+    args = bp().parse_args(raw[:index])
+    passthrough = raw[index + 1 :]
     assert args.target == "hermes"
-    assert args.rest[-2:] == ["-q", "hello"]
+    assert passthrough == ["-q", "hello"]
+
+
+def test_flags_and_passthrough_can_coexist():
+    """The case that broke first: a flag AND a `--` tail on the same line."""
+    raw = ["launch", "hermes", "--use-profile", "work", "--", "-q", "hi"]
+    index = raw.index("--")
+    args = build_parser().parse_args(raw[:index])
+    assert args.use_profile == "work"
+    assert raw[index + 1 :] == ["-q", "hi"]
 
 
 def test_launch_can_target_another_program():
-    args = build_parser().parse_args(["launch", "aider", "--model", "gpt-4o"])
+    """Flags for the target go after `--`, since cachellm has flags of its own."""
+    raw = ["launch", "aider", "--", "--model", "gpt-4o"]
+    index = raw.index("--")
+    args = build_parser().parse_args(raw[:index])
     assert args.target == "aider"
-    assert "--model" in args.rest
+    assert raw[index + 1 :] == ["--model", "gpt-4o"]
 
 
 def test_launch_flags():
@@ -165,6 +183,129 @@ def test_launch_flags():
 def test_base_url_vars_cover_the_common_tools():
     assert "OPENAI_BASE_URL" in BASE_URL_VARS
     assert "OPENAI_API_BASE" in BASE_URL_VARS
+
+
+def test_use_profile_bare_means_the_default_profile():
+    args = build_parser().parse_args(["launch", "--use-profile"])
+    assert args.use_profile == "", "bare flag means the default profile"
+
+
+def test_use_profile_can_name_a_profile():
+    args = build_parser().parse_args(["launch", "--use-profile", "work"])
+    assert args.use_profile == "work"
+
+
+def test_use_profile_absent_by_default():
+    args = build_parser().parse_args(["launch"])
+    assert args.use_profile is None, "default is the throwaway profile"
+
+
+def test_unlink_command_exists():
+    args = build_parser().parse_args(["unlink"])
+    assert args.command == "unlink"
+    assert args.profile is None
+    assert build_parser().parse_args(["unlink", "work"]).profile == "work"
+    assert build_parser().parse_args(["unlink", "--list"]).list is True
+
+
+# ---------------------------------------------------------------------------
+# repointing an existing profile, and putting it back
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_hermes(tmp_path, monkeypatch):
+    """A pretend Hermes install plus a stubbed `hermes config set`."""
+    from cachellm import launch as launch_mod
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(HERMES_CONFIG, encoding="utf-8")
+    (home / ".env").write_text("MY_PROVIDER_KEY=live-key\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "state"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, *, quiet=True):
+        calls.append(list(args))
+        # Emulate `hermes config set model.base_url <url>` writing the file.
+        if "config" in args and "set" in args and "model.base_url" in args:
+            url = args[args.index("model.base_url") + 1]
+            profile = args[args.index("--profile") + 1] if "--profile" in args else None
+            target = home if profile in (None, "default") else home / "profiles" / profile
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / "config.yaml"
+            existing = path.read_text(encoding="utf-8") if path.is_file() else HERMES_CONFIG
+            path.write_text(
+                re.sub(r"(?m)^(  base_url: ).*$", rf"\g<1>{url}", existing),
+                encoding="utf-8",
+            )
+        return 0, "ok"
+
+    monkeypatch.setattr(launch_mod, "run_hermes_command", fake_run)
+    return {"home": home, "calls": calls}
+
+
+def test_point_profile_at_proxy_and_restore(fake_hermes):
+    from cachellm.launch import (
+        point_profile_at_proxy,
+        read_base_url,
+        restore_points,
+        restore_profile,
+    )
+
+    assert read_base_url("default") == "https://api.example.com/v1"
+
+    ok, detail, original = point_profile_at_proxy("default", "http://127.0.0.1:4000")
+    assert ok is True
+    assert detail == "repointed"
+    assert original == "https://api.example.com/v1"
+    assert read_base_url("default") == "http://127.0.0.1:4000/v1"
+    assert restore_points()["default"] == "https://api.example.com/v1"
+
+    ok, restored = restore_profile("default")
+    assert ok is True
+    assert restored == "https://api.example.com/v1"
+    assert read_base_url("default") == "https://api.example.com/v1"
+    assert restore_points() == {}, "the restore point is cleared once used"
+
+
+def test_repointing_twice_keeps_the_original_provider(fake_hermes):
+    """The dangerous case: running launch twice must not save the proxy URL
+    as the 'original', which would make unlink a no-op."""
+    from cachellm.launch import point_profile_at_proxy, restore_points
+
+    point_profile_at_proxy("default", "http://127.0.0.1:4000")
+    point_profile_at_proxy("default", "http://127.0.0.1:4000")
+    assert restore_points()["default"] == "https://api.example.com/v1"
+
+
+def test_repointing_an_already_pointed_profile_is_a_noop(fake_hermes):
+    from cachellm.launch import point_profile_at_proxy
+
+    point_profile_at_proxy("default", "http://127.0.0.1:4000")
+    ok, detail, _ = point_profile_at_proxy("default", "http://127.0.0.1:4000")
+    assert ok is True
+    assert detail == "already pointed at the cache"
+
+
+def test_restore_without_a_saved_point_fails_cleanly(fake_hermes):
+    from cachellm.launch import restore_profile
+
+    ok, message = restore_profile("never-touched")
+    assert ok is False
+    assert "no saved provider URL" in message
+
+
+def test_looks_like_proxy():
+    from cachellm.launch import looks_like_proxy
+
+    base = "http://127.0.0.1:4000"
+    assert looks_like_proxy("http://127.0.0.1:4000/v1", base) is True
+    assert looks_like_proxy("http://localhost:4000/v1", base) is True
+    assert looks_like_proxy("https://api.example.com/v1", base) is False
+    assert looks_like_proxy("", base) is False
 
 
 # ---------------------------------------------------------------------------

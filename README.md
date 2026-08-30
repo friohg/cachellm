@@ -90,7 +90,7 @@ cachellm launch hermes -- -q "summarise this repo"
 cachellm launch hermes -- --tui
 ```
 
-Useful flags: `--semantic` turns on reworded-question matching, `--ttl 7200` changes how long answers live, `--from-profile work` reads the provider out of a different Hermes profile, `--upstream https://...` overrides the provider entirely.
+Useful flags: `--use-profile` uses a profile you already work in instead (see below), `--semantic` turns on reworded-question matching, `--ttl 7200` changes how long answers live, `--from-profile work` reads the provider out of a different Hermes profile, `--upstream https://...` overrides the provider entirely.
 
 ### One thing you need to know about agents
 
@@ -163,6 +163,82 @@ cachellm launch -- some-other-tool --flag
 By default the proxy holds your provider key and throws away whatever `Authorization` header the client sent. If you'd rather each client bring its own key, set `FORWARD_CLIENT_KEY=true`.
 
 Endpoints: `POST /v1/chat/completions` and `POST /v1/responses` go through the full cache; `GET /v1/models` and `POST /v1/embeddings` pass straight through.
+
+## Two things people ask
+
+**"If the system prompt is cached, does my agent lose context?"**
+
+No, and it's worth being precise about why, because the word "caching" means two different things here.
+
+What OpenAI and Anthropic do is *server-side prompt caching*: they keep the KV state of your prompt prefix on their GPUs so they don't have to recompute it. You still send the whole prompt every time; they just charge you less for the part they recognise.
+
+This does something completely different. It's a lookup table sitting in front of the provider. Your agent sends the full request — system prompt, every message, tool schemas, all of it — exactly as it always did. Nothing is stripped out, summarised or held back. Then one of two things happens:
+
+- The request is identical to one seen before, so the stored answer is handed back and the provider is never contacted.
+- It isn't, so the entire request goes to the provider untouched.
+
+The model never sees a partial conversation, because the cache never *edits* a request. It only ever answers it or forwards it whole.
+
+And the moment your agent adds a turn, the request is different, so it's a miss and goes upstream with the full history. That's the normal case in a conversation: turn one might hit, turn two is new and can't. The hits you actually get are the genuinely repeated calls — the same file read twice, the same classification step, a retry after a tool error, parallel workers doing identical setup.
+
+Demonstrated rather than argued. Here's the model recalling something only reachable through the full thread, on a cache miss:
+
+```
+system:    "SYSTEM_MARKER_ABC. Answer with one word only."
+user:      "pineapple"
+assistant: "one"
+user:      "Repeat the exact marker string from your system prompt."
+assistant: "SYSTEM_MARKER_ABC"
+user:      "What was my very first message? One word."
+
+reply:     pineapple
+```
+
+Both the system prompt and the first user message arrived intact. And on a hit you get the *whole* response object back — same content, `finish_reason`, `usage`, everything:
+
+```
+x-cachellm-cache: exact
+x-cachellm-age: 34.9
+reply: SYSTEM_MARKER_ABC   usage present: True   finish_reason: stop
+```
+
+There are tests pinning this down — `test_full_conversation_is_forwarded_on_a_miss`, `test_second_turn_of_a_conversation_still_sends_everything`, `test_tool_schemas_are_forwarded_intact`, `test_cache_hit_returns_the_whole_response_not_a_fragment` — so it can't quietly break later.
+
+The only fields deliberately left out of the cache key are ones that can't change the reply: `stream`, `stream_options`, `user`, `metadata`. They're still forwarded; they just don't split the cache, which is why a streamed and a non-streamed version of the same question share one entry.
+
+**"Can I use my own profile instead of a new one?"**
+
+Yes:
+
+```bash
+cachellm launch hermes --use-profile          # your default profile
+cachellm launch hermes --use-profile work     # a named one
+```
+
+This changes that profile's `model.base_url` to point at the cache, and writes down where it used to point. Everything else — sessions, memory, skills, keys — is untouched. When you want out:
+
+```bash
+cachellm unlink            # restore everything cachellm repointed
+cachellm unlink work       # just that one
+cachellm unlink --list     # what's repointed right now, and where from
+```
+
+A real round trip:
+
+```
+BEFORE: https://api.justwoker.icu/v1
+
+  cachellm-test now goes through the cache
+  its provider was https://api.justwoker.icu/v1
+  put it back any time with:  cachellm unlink cachellm-test
+
+AFTER launch: http://127.0.0.1:4000/v1
+AFTER unlink: https://api.justwoker.icu/v1
+```
+
+Two things worth knowing. Running `launch --use-profile` twice won't clobber the saved original — there's a test for that, because getting it wrong would make `unlink` silently useless. And a repointed profile has nowhere to send requests if the proxy isn't running; `cachellm launch` starts it for you, but if you run `hermes` directly, either have the proxy up or `cachellm unlink` first.
+
+The default is still the throwaway profile, because that's the safer thing to hand someone who's only trying this out.
 
 ## Running it by hand
 
@@ -420,6 +496,7 @@ TTLs handle the rest — expired entries are skipped on read and swept every fiv
 
 ```
 cachellm launch     start the cache and hand it to an app (hermes by default)
+cachellm unlink     put a repointed Hermes profile back
 cachellm start      just run the proxy and dashboard
 cachellm stats      hit rate, tokens saved, money saved, latency
 cachellm clear      throw entries away
@@ -491,12 +568,12 @@ docker run -p 4000:4000 -v cachellm-data:/data \
 ```bash
 pip install -e ".[dev]"
 pytest -q
-# 175 passed
+# 191 passed
 ```
 
 They run the real proxy against a real in-process fake provider wired together with `httpx.ASGITransport`, so requests go through the actual HTTP layer, the actual streaming code and the actual cache engine. Nothing important is mocked out.
 
-The interesting ones: different system prompts never sharing an answer, tool schema changes producing different keys, ten concurrent identical requests producing exactly one upstream call, truncated streams not being cached, single-flight slots being released after an exception, the cache backend failing both open and closed, mutating tools being refused, and the dashboard's accessibility contract.
+The interesting ones: different system prompts never sharing an answer, tool schema changes producing different keys, ten concurrent identical requests producing exactly one upstream call, truncated streams not being cached, single-flight slots being released after an exception, the cache backend failing both open and closed, mutating tools being refused, the full conversation and all tool schemas arriving at the provider unmodified on a miss, profile repointing surviving being run twice, and the dashboard's accessibility contract.
 
 ## How it's put together
 
@@ -519,13 +596,13 @@ cachellm/
   stats.py         counters and the request log
   db.py            SQLite schema and queries
   singleflight.py  request coalescing
-  launch.py        cachellm launch
+  launch.py        cachellm launch and unlink
   config.py        layered configuration
   logging_utils.py structured logs and redaction
   cli.py           the command line
 examples/          clients, tool-cache harness, fake provider, end-to-end check
 tools/             the accessibility audit
-tests/             175 tests
+tests/             191 tests
 ```
 
 Adding another provider means writing one adapter class and registering it:

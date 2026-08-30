@@ -199,3 +199,138 @@ async def test_chat_and_responses_endpoints_have_separate_keys(client, upstream)
     )
     assert response.headers["x-cachellm-cache"] == "miss"
     assert upstream.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# The proxy is a cache, not a context manager. On a miss the provider must
+# receive the request byte-for-byte; nothing is stripped, summarised or held
+# back. These tests exist because "does caching lose my context?" is the first
+# thing anyone sensibly worries about.
+# ---------------------------------------------------------------------------
+
+
+async def test_full_conversation_is_forwarded_on_a_miss(client, upstream):
+    conversation = {
+        "model": "test-model",
+        "messages": [
+            {"role": "system", "content": "You are a careful assistant. Rule one: be brief."},
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second question"},
+            {"role": "assistant", "content": "second answer"},
+            {"role": "user", "content": "third question"},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 512,
+    }
+    await client.post("/v1/chat/completions", json=conversation)
+
+    assert upstream.calls == 1
+    sent = upstream.seen_payloads[0]
+    # Every message, in order, unmodified - including the system prompt.
+    assert sent["messages"] == conversation["messages"]
+    assert sent["messages"][0]["role"] == "system"
+    assert "Rule one: be brief." in sent["messages"][0]["content"]
+    assert sent["temperature"] == 0.3
+    assert sent["max_tokens"] == 512
+
+
+async def test_second_turn_of_a_conversation_still_sends_everything(client, upstream):
+    """A cached first turn must not stop the second turn carrying its history."""
+    first = {
+        "model": "test-model",
+        "messages": [
+            {"role": "system", "content": "system rules here"},
+            {"role": "user", "content": "turn one"},
+        ],
+    }
+    await client.post("/v1/chat/completions", json=first)
+    hit = await client.post("/v1/chat/completions", json=first)
+    assert hit.headers["x-cachellm-cache"] == "exact"
+    assert upstream.calls == 1
+
+    second = {
+        "model": "test-model",
+        "messages": [
+            *first["messages"],
+            {"role": "assistant", "content": "reply to turn one"},
+            {"role": "user", "content": "turn two"},
+        ],
+    }
+    await client.post("/v1/chat/completions", json=second)
+
+    assert upstream.calls == 2, "a new turn is a miss and must reach the provider"
+    sent = upstream.seen_payloads[-1]
+    assert len(sent["messages"]) == 4
+    assert sent["messages"][0]["content"] == "system rules here"
+    assert sent["messages"][-1]["content"] == "turn two"
+
+
+async def test_tool_schemas_are_forwarded_intact(client, upstream):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_repositories",
+                "description": "List the repos",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"page": {"type": "integer"}},
+                    "required": ["page"],
+                },
+            },
+        }
+    ]
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "list them"}],
+            "tools": tools,
+            "tool_choice": "auto",
+        },
+    )
+    sent = upstream.seen_payloads[0]
+    assert sent["tools"] == tools, "tool schemas must arrive complete"
+    assert sent["tool_choice"] == "auto"
+
+
+async def test_cache_hit_returns_the_whole_response_not_a_fragment(client, upstream):
+    """A hit replays the entire response object, so the client's state is intact."""
+    body = chat_body(user="give me the whole thing")
+    first = await client.post("/v1/chat/completions", json=body)
+    second = await client.post("/v1/chat/completions", json=body)
+
+    assert second.json() == first.json()
+    payload = second.json()
+    assert payload["choices"][0]["message"]["role"] == "assistant"
+    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert payload["usage"]["prompt_tokens"] == 11
+    assert payload["model"] == "test-model"
+
+
+async def test_only_non_content_fields_are_omitted_from_the_key(client, upstream):
+    """`stream` and `user` don't change the answer, so they don't split the cache -
+    but they are still forwarded upstream when we do call it."""
+    await client.post(
+        "/v1/chat/completions",
+        json=chat_body(user="who am i", stream=False, user_id_unused=None),
+    )
+    sent = upstream.seen_payloads[0]
+    assert sent["messages"][-1]["content"] == "who am i"
+    # The control fields we add for ourselves never leak upstream.
+    assert not any(key.startswith("cachellm_") for key in sent)
+
+
+async def test_cachellm_control_fields_are_stripped_before_forwarding(client, upstream):
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            **chat_body(user="strip my knobs"),
+            "cachellm_ttl": 60,
+            "cachellm_namespace": "team-a",
+        },
+    )
+    sent = upstream.seen_payloads[0]
+    assert "cachellm_ttl" not in sent
+    assert "cachellm_namespace" not in sent

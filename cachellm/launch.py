@@ -339,6 +339,133 @@ def exec_hermes(profile: str, passthrough: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# pointing a profile at the proxy (and putting it back)
+# ---------------------------------------------------------------------------
+
+
+def state_dir() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_STATE_HOME")
+    return Path(base) / "cachellm" if base else Path.home() / ".cachellm"
+
+
+def restore_file() -> Path:
+    return state_dir() / "hermes-restore.json"
+
+
+def read_base_url(profile: str | None) -> str:
+    """What is this profile's model.base_url right now?"""
+    home = hermes_home()
+    if home is None:
+        return ""
+    model = read_model_block(_profile_dir(home, profile) / "config.yaml")
+    return model.get("base_url", "")
+
+
+def set_base_url(profile: str | None, url: str, *, verbose: bool = False) -> tuple[bool, str]:
+    """Change a profile's base_url through the Hermes CLI.
+
+    Deliberately shelling out rather than editing config.yaml ourselves - a
+    stray indent in that file breaks Hermes, and `hermes config set` knows how
+    to write it safely.
+    """
+    args: list[str] = []
+    if profile and profile != "default":
+        args += ["--profile", profile]
+    args += ["config", "set", "model.base_url", url]
+    code, output = run_hermes_command(args, quiet=not verbose)
+    return code == 0, output
+
+
+def remember_original(profile: str, original_url: str) -> None:
+    """Write down where a profile used to point, so we can undo it."""
+    import json
+
+    path = restore_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError):
+        saved = {}
+    # Never overwrite an existing restore point with a proxy URL - that would
+    # lose the real provider if launch ran twice.
+    if profile not in saved:
+        saved[profile] = original_url
+        path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+
+
+def restore_points() -> dict[str, str]:
+    import json
+
+    path = restore_file()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def forget_original(profile: str) -> None:
+    import json
+
+    path = restore_file()
+    saved = restore_points()
+    if profile in saved:
+        saved.pop(profile)
+        try:
+            if saved:
+                path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def looks_like_proxy(url: str, proxy_base: str) -> bool:
+    if not url:
+        return False
+    normalised = url.rstrip("/")
+    return normalised in {proxy_base.rstrip("/"), f"{proxy_base.rstrip('/')}/v1"} or (
+        "127.0.0.1" in normalised or "localhost" in normalised
+    ) and "/v1" in normalised
+
+
+def point_profile_at_proxy(
+    profile: str,
+    proxy_base: str,
+    *,
+    verbose: bool = False,
+) -> tuple[bool, str, str]:
+    """Repoint an existing profile, remembering where it used to go.
+
+    Returns (ok, message, original_url).
+    """
+    original = read_base_url(profile)
+    if looks_like_proxy(original, proxy_base):
+        return True, "already pointed at the cache", original
+    if original:
+        remember_original(profile, original)
+    ok, output = set_base_url(profile, f"{proxy_base}/v1", verbose=verbose)
+    if not ok:
+        return False, f"could not update the profile: {output.strip()[:300]}", original
+    return True, "repointed", original
+
+
+def restore_profile(profile: str, *, verbose: bool = False) -> tuple[bool, str]:
+    """Put a profile's base_url back to whatever it was before launch."""
+    saved = restore_points()
+    original = saved.get(profile)
+    if not original:
+        return False, f"no saved provider URL for profile {profile!r}"
+    ok, output = set_base_url(profile, original, verbose=verbose)
+    if not ok:
+        return False, f"could not restore {profile!r}: {output.strip()[:300]}"
+    forget_original(profile)
+    return True, original
+
+
+# ---------------------------------------------------------------------------
 # launching anything else
 # ---------------------------------------------------------------------------
 

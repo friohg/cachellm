@@ -154,6 +154,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
         exec_hermes,
         exec_with_proxy_env,
         default_log_path,
+        point_profile_at_proxy,
         proxy_is_up,
         proxy_url,
         start_proxy_detached,
@@ -169,7 +170,6 @@ def cmd_launch(args: argparse.Namespace) -> int:
     passthrough = list(args.rest or [])
     if passthrough and passthrough[0] == "--":
         passthrough = passthrough[1:]
-
     # Figure out the upstream. Explicit flag wins, then whatever is already in
     # the environment/config, then whatever Hermes is configured to use.
     hermes_info = discover_hermes_upstream(args.from_profile)
@@ -231,6 +231,28 @@ def cmd_launch(args: argparse.Namespace) -> int:
         print("  cache is up")
 
     if target == "hermes":
+        # Two modes:
+        #   default        - a throwaway profile, your own is untouched
+        #   --use-profile  - repoint a profile you already use, remembering
+        #                    where it pointed so `cachellm unlink` can undo it
+        if args.use_profile is not None:
+            profile = args.use_profile or "default"
+            ok, detail, original = point_profile_at_proxy(
+                profile, base, verbose=args.verbose
+            )
+            if not ok:
+                print(detail, file=sys.stderr)
+                return 1
+            label = profile if profile != "default" else "your default profile"
+            if detail == "repointed":
+                print(f"  {label} now goes through the cache")
+                print(f"  its provider was {original}")
+                print(f"  put it back any time with:  cachellm unlink {profile}")
+            else:
+                print(f"  {label} {detail}")
+            print(f"  dashboard: {base}/dashboard\n")
+            return exec_hermes(profile if profile != "default" else None, passthrough)
+
         profile = args.profile_name or DEFAULT_LAUNCH_PROFILE
         ok, detail = ensure_hermes_profile(
             profile, base, source_profile=args.from_profile, verbose=args.verbose
@@ -250,6 +272,36 @@ def cmd_launch(args: argparse.Namespace) -> int:
 
 
 DEFAULT_LAUNCH_PROFILE = "cachellm"
+
+
+def cmd_unlink(args: argparse.Namespace) -> int:
+    """Point a repointed Hermes profile back at its real provider."""
+    from .launch import restore_points, restore_profile
+
+    saved = restore_points()
+    if args.list:
+        if not saved:
+            print("no profiles are currently pointed at the cache by cachellm")
+            return 0
+        print("profiles cachellm repointed, and where they came from:")
+        for profile, url in sorted(saved.items()):
+            print(f"  {profile:<20} {url}")
+        return 0
+
+    if not saved:
+        print("nothing to undo - no profile was repointed by cachellm")
+        return 0
+
+    targets = [args.profile] if args.profile else sorted(saved)
+    failures = 0
+    for profile in targets:
+        ok, detail = restore_profile(profile, verbose=args.verbose)
+        if ok:
+            print(f"  {profile} points back at {detail}")
+        else:
+            print(f"  {profile}: {detail}", file=sys.stderr)
+            failures += 1
+    return 1 if failures else 0
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
@@ -618,8 +670,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launch.add_argument(
         "rest",
-        nargs=argparse.REMAINDER,
-        help="arguments passed straight through to the target",
+        nargs="*",
+        help="arguments for the target; put them after -- so they are not "
+             "mistaken for cachellm's own flags",
     )
     launch.add_argument("--port", type=int, help="proxy port (default 4000)")
     launch.add_argument("--upstream", help="provider base URL to forward to")
@@ -630,6 +683,15 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument(
         "--from-profile",
         help="Hermes profile to read the upstream from and clone (default: default)",
+    )
+    launch.add_argument(
+        "--use-profile",
+        nargs="?",
+        const="",
+        metavar="NAME",
+        help="use a profile you already work in instead of a throwaway one. "
+             "Bare --use-profile means your default profile. This edits that "
+             "profile's model.base_url; 'cachellm unlink' puts it back.",
     )
     launch.add_argument("--ttl", type=int, help="default cache TTL in seconds")
     launch.add_argument(
@@ -645,6 +707,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launch.add_argument("--verbose", action="store_true", help="show the hermes setup output")
     launch.set_defaults(func=cmd_launch)
+
+    unlink = sub.add_parser(
+        "unlink",
+        help="point a Hermes profile back at its real provider",
+        description=(
+            "Undoes 'cachellm launch --use-profile'. With no profile named, it "
+            "restores every profile cachellm repointed."
+        ),
+    )
+    unlink.add_argument("profile", nargs="?", help="profile to restore (default: all of them)")
+    unlink.add_argument("--list", action="store_true", help="show what is currently repointed")
+    unlink.add_argument("--verbose", action="store_true")
+    unlink.set_defaults(func=cmd_unlink)
 
     stats = sub.add_parser("stats", help="show statistics and savings")
     stats.add_argument("--json", action="store_true")
@@ -690,8 +765,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+
+    # Split on the first bare `--` ourselves. argparse cannot both accept
+    # optional flags after a positional and hand the tail to a subprocess, and
+    # `cachellm launch hermes --use-profile work -- -q "hi"` has to work.
+    passthrough: list[str] = []
+    if "--" in raw:
+        index = raw.index("--")
+        raw, passthrough = raw[:index], raw[index + 1 :]
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
+    if getattr(args, "command", None) == "launch":
+        args.rest = list(getattr(args, "rest", []) or []) + passthrough
+    elif passthrough:
+        parser.error(f"unexpected arguments after --: {' '.join(passthrough)}")
+
     configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
     try:
         return int(args.func(args) or 0)
